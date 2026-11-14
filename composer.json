@@ -1,0 +1,53 @@
+{
+    "name": "indianopinion/import-scheduler",
+    "description": "Runs each import rule on its own interval on a dedicated cron lane with its own database lock, so one slow pass never starves the rest.",
+    "type": "wordpress-plugin",
+    "license": "MIT",
+    "keywords": [
+        "wordpress",
+        "cron",
+        "scheduler",
+        "import",
+        "wp-cli",
+        "feeds"
+    ],
+    "homepage": "https://github.com/IndianOpinion/import-scheduler",
+    "support": {
+        "issues": "https://github.com/IndianOpinion/import-scheduler/issues",
+        "email": "hello@indianopinion.org"
+    },
+    "require": {
+        "php": ">=8.1"
+    },
+    "require-dev": {
+        "php-stubs/wordpress-stubs": "^6.9",
+        "php-stubs/wp-cli-stubs": "^2.12",
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^10.5",
+        "squizlabs/php_codesniffer": "^3.10"
+    },
+    "autoload": {
+        "psr-4": {
+            "IndianOpinion\\ImportScheduler\\": "src/"
+        },
+        "files": [
+            "src/functions.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "IndianOpinion\\ImportScheduler\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.1.0"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "lint": "phpcs"
+    }
+}
