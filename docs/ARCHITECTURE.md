@@ -149,7 +149,7 @@ Options: `import_scheduler_settings` (not autoloaded),
   `running`, so a run that finishes at the same moment is not overwritten.
 - **Statement budget.** A tick with nothing due costs six statements: clock,
   slot take, rule rows, due query, slot release, and the tick row from ruling
-  2. The PRD's budget of five predates that ruling. The daily prune is
+  2. The PRD's budget of five predated that ruling; the PRD now says six. The daily prune is
   claimed through a lock row `prune:daily` that expires after a day, and only
   ticks that start within `expected_cadence + budget` seconds of the top of an
   hour try the claim, so other ticks spend nothing on it.
@@ -159,6 +159,29 @@ Options: `import_scheduler_settings` (not autoloaded),
   `$wpdb` error. Renew follows its `UPDATE` with a read of the row, because
   MySQL reports zero changed rows when a renew lands in the same second as
   the take.
+- **State read again under the rule lock.** The tick's due list is read once,
+  so by the time a rule's turn comes another slot or a manual run may have
+  run it, or an operator may have paused it or moved it to another lane.
+  Once the runner holds the rule lock it reads the state row again (this
+  replaced the read of the run row for `import_scheduler_run_started`, whose
+  payload is now built in PHP, so a run still costs at most 8 statements)
+  and, in a tick, runs the rule only if it is still due by the tick's start,
+  unpaused and in the lane being ticked. Otherwise it releases the lock and
+  the tick prints "skipped: no longer due". The fresh row also feeds the
+  next-run and failure-count arithmetic.
+- **Early manual runs.** On success the scheduled time is the smaller of the
+  stored next run and the run's start, so `run <id>` on a rule that is not
+  yet due schedules the next run one interval after the manual run instead of
+  one interval after the old next run.
+- **Slot expiry and overrides.** The slot is taken before Sync with an expiry
+  from registered lanes and intervals. Sync's rows carry the operator's lane
+  and interval overrides; when they bring a slower rule into the lane, the
+  tick renews the slot with the longer expiry before the first run. A tick
+  whose slot renew fails after a run (the slot expired and another tick took
+  it) stops choosing rules, logs it and leaves the other tick's slot alone.
+- **WP-CLI errors.** Every command other than `tick` reports missing tables
+  and database errors as a WP-CLI error with exit 1, not an uncaught
+  exception. Only the tick and the screen create missing tables.
 - **Ownership check before the state write.** After a run, the runner reads
   its rule lock. If it still owns it, it writes the state (including next
   run) and only then releases the lock, so no other process can start the
