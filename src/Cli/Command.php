@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace IndianOpinion\ImportScheduler\Cli;
 
 use IndianOpinion\ImportScheduler\DbTime;
-use IndianOpinion\ImportScheduler\Exception\ImportSchedulerException;
+use IndianOpinion\ImportScheduler\Exception\InvalidRuleException;
 use IndianOpinion\ImportScheduler\Exception\LockException;
+use IndianOpinion\ImportScheduler\Exception\SchemaException;
+use IndianOpinion\ImportScheduler\Exception\StorageException;
 use IndianOpinion\ImportScheduler\Installer;
 use IndianOpinion\ImportScheduler\Locks;
 use IndianOpinion\ImportScheduler\Operator;
@@ -109,26 +111,28 @@ final class Command
      */
     public function list_(array $args, array $assoc): void
     {
-        $format = $this->format($assoc);
-        if ($format === null) {
-            return;
-        }
-        $operator = $this->plugin->operator();
-        $now = $this->plugin->storage()->now();
-        $rules = $operator->rules();
-        $medians = $operator->medians(array_keys($rules));
-        $rows = [];
-        foreach ($rules as $id => $rule) {
-            $status = $rule->status($now);
-            if (isset($assoc['lane']) && $rule->lane !== $assoc['lane']) {
-                continue;
+        $this->safely(function () use ($assoc): void {
+            $format = $this->format($assoc);
+            if ($format === null) {
+                return;
             }
-            if (isset($assoc['status']) && $status !== $assoc['status'] && !($assoc['status'] === 'slow' && $status === RuleState::STATUS_SLOW)) {
-                continue;
+            $operator = $this->plugin->operator();
+            $now = $this->plugin->storage()->now();
+            $rules = $operator->rules();
+            $medians = $operator->medians(array_keys($rules));
+            $rows = [];
+            foreach ($rules as $id => $rule) {
+                $status = $rule->status($now);
+                if (isset($assoc['lane']) && $rule->lane !== $assoc['lane']) {
+                    continue;
+                }
+                if (isset($assoc['status']) && $status !== $assoc['status'] && !($assoc['status'] === 'slow' && $status === RuleState::STATUS_SLOW)) {
+                    continue;
+                }
+                $rows[] = self::ruleRow($rule, $status, $medians[$id] ?? null, $now);
             }
-            $rows[] = self::ruleRow($rule, $status, $medians[$id] ?? null, $now);
-        }
-        $this->output($rows, ['id', 'label', 'lane', 'interval', 'status', 'last_run', 'last_duration', 'last_result', 'next_run', 'failures', 'median'], $format);
+            $this->output($rows, ['id', 'label', 'lane', 'interval', 'status', 'last_run', 'last_duration', 'last_result', 'next_run', 'failures', 'median'], $format);
+        });
     }
 
     /**
@@ -139,62 +143,64 @@ final class Command
      */
     public function status(array $args, array $assoc): void
     {
-        $settings = $this->plugin->settings(true);
-        $storage = $this->plugin->storage();
-        $now = $storage->now();
-        $operator = $this->plugin->operator();
-        $rules = $operator->rules();
-        $ticks = $storage->latestTicks();
-        $cadence = $settings->int('expected_cadence');
+        $this->safely(function (): void {
+            $settings = $this->plugin->settings(true);
+            $storage = $this->plugin->storage();
+            $now = $storage->now();
+            $operator = $this->plugin->operator();
+            $rules = $operator->rules();
+            $ticks = $storage->latestTicks();
+            $cadence = $settings->int('expected_cadence');
 
-        $this->io->line('Kill switch: ' . ($settings->enabled() ? 'off (running)' : ($settings->constantDisabled() ? 'ON (IMPORT_SCHEDULER_DISABLE)' : 'ON (setting)')));
-        $rows = [];
-        foreach ($operator->lanes($rules) as $lane) {
-            $count = count(array_filter($rules, static fn (RuleState $r): bool => $r->lane === $lane && $r->registered));
-            $tick = $ticks[$lane] ?? null;
-            $stale = $tick === null || $tick['started'] < $now - 3 * $cadence;
-            $rows[] = [
-                'lane' => $lane,
-                'slots' => $settings->laneConcurrency($lane),
-                'rules' => $count,
-                'paused' => $settings->isLanePaused($lane) ? 'yes' : 'no',
-                'last_tick' => $tick !== null ? Tick::stamp($tick['started']) : 'never',
-                'outcome' => $tick !== null ? self::outcome($tick['outcome'], $tick['runs'], $tick['reason']) : '',
-                'health' => $stale ? 'no tick seen in ' . (3 * $cadence) . 's: check the cron line' : 'ok',
-            ];
-        }
-        $this->io->table($rows, ['lane', 'slots', 'rules', 'paused', 'last_tick', 'outcome', 'health'], 'table');
-
-        $locks = [];
-        foreach ($storage->allLocks() as $lock) {
-            $locks[] = [
-                'name' => $lock['name'],
-                'holder' => substr($lock['owner'], 0, 8),
-                'expires' => Tick::stamp($lock['expires']),
-                'state' => $lock['expires'] < $now ? 'expired' : 'held',
-            ];
-        }
-        if ($locks === []) {
-            $this->io->line('Locks: none held.');
-        } else {
-            $this->io->table($locks, ['name', 'holder', 'expires', 'state'], 'table');
-        }
-
-        $guards = $this->plugin->guards($settings);
-        foreach ($operator->lanes($rules) as $lane) {
-            $reason = $guards->check($lane);
-            $this->io->line(sprintf('Guards for %s: %s', $lane, $reason === null ? 'pass' : 'stand down (' . $reason . ')'));
-            foreach ($guards->notes() as $note) {
-                $this->io->line('  note: ' . $note);
+            $this->io->line('Kill switch: ' . ($settings->enabled() ? 'off (running)' : ($settings->constantDisabled() ? 'ON (IMPORT_SCHEDULER_DISABLE)' : 'ON (setting)')));
+            $rows = [];
+            foreach ($operator->lanes($rules) as $lane) {
+                $count = count(array_filter($rules, static fn (RuleState $r): bool => $r->lane === $lane && $r->registered));
+                $tick = $ticks[$lane] ?? null;
+                $stale = $tick === null || $tick['started'] < $now - 3 * $cadence;
+                $rows[] = [
+                    'lane' => $lane,
+                    'slots' => $settings->laneConcurrency($lane),
+                    'rules' => $count,
+                    'paused' => $settings->isLanePaused($lane) ? 'yes' : 'no',
+                    'last_tick' => $tick !== null ? Tick::stamp($tick['started']) : 'never',
+                    'outcome' => $tick !== null ? self::outcome($tick['outcome'], $tick['runs'], $tick['reason']) : '',
+                    'health' => $stale ? 'no tick seen in ' . (3 * $cadence) . 's: check the cron line' : 'ok',
+                ];
             }
-        }
-        $missing = Installer::missingColumns();
-        if ($missing !== []) {
-            $this->io->warning('Missing columns: ' . Installer::describe($missing));
-        }
-        foreach ($operator->missingFromTick($rules) as $id) {
-            $this->io->warning(sprintf('Rule %s is registered here but the last tick did not see it. Register rules unconditionally.', $id));
-        }
+            $this->io->table($rows, ['lane', 'slots', 'rules', 'paused', 'last_tick', 'outcome', 'health'], 'table');
+
+            $locks = [];
+            foreach ($storage->allLocks() as $lock) {
+                $locks[] = [
+                    'name' => $lock['name'],
+                    'holder' => substr($lock['owner'], 0, 8),
+                    'expires' => Tick::stamp($lock['expires']),
+                    'state' => $lock['expires'] < $now ? 'expired' : 'held',
+                ];
+            }
+            if ($locks === []) {
+                $this->io->line('Locks: none held.');
+            } else {
+                $this->io->table($locks, ['name', 'holder', 'expires', 'state'], 'table');
+            }
+
+            $guards = $this->plugin->guards($settings);
+            foreach ($operator->lanes($rules) as $lane) {
+                $reason = $guards->check($lane);
+                $this->io->line(sprintf('Guards for %s: %s', $lane, $reason === null ? 'pass' : 'stand down (' . $reason . ')'));
+                foreach ($guards->notes() as $note) {
+                    $this->io->line('  note: ' . $note);
+                }
+            }
+            $missing = Installer::missingColumns();
+            if ($missing !== []) {
+                $this->io->warning('Missing columns: ' . Installer::describe($missing));
+            }
+            foreach ($operator->missingFromTick($rules) as $id) {
+                $this->io->warning(sprintf('Rule %s is registered here but the last tick did not see it. Register rules unconditionally.', $id));
+            }
+        });
     }
 
     /**
@@ -213,41 +219,43 @@ final class Command
      */
     public function run(array $args, array $assoc): void
     {
-        $id = (string) ($args[0] ?? '');
-        $rule = $this->plugin->registry()->get($id);
-        if ($rule === null) {
-            $this->fail('no such rule: ' . $id);
-            return;
-        }
-        $storage = $this->plugin->storage();
-        $now = $storage->now();
-        $state = $storage->getRuleState($id);
-        if ($state === null) {
-            $storage->insertRuleStates([Sync::newRow($rule, $now, $this->plugin->nextRun())]);
+        $this->safely(function () use ($args, $assoc): void {
+            $id = (string) ($args[0] ?? '');
+            $rule = $this->plugin->registry()->get($id);
+            if ($rule === null) {
+                $this->fail('no such rule: ' . $id);
+                return;
+            }
+            $storage = $this->plugin->storage();
+            $now = $storage->now();
             $state = $storage->getRuleState($id);
-        }
-        if ($state === null) {
-            $this->fail('could not create the state row for ' . $id);
-            return;
-        }
-        if ($state['paused'] === 1 && !isset($assoc['ignore-pause'])) {
-            $this->fail(sprintf('rule %s is paused (%s); use --ignore-pause to run it anyway', $id, $state['pause_reason']));
-            return;
-        }
-        $run = $this->plugin->runner()->run($rule, $state, new DbTime($now, $this->plugin->clock()));
-        if ($run === null) {
-            $lock = $storage->getLock(Locks::rule($id));
-            $this->fail(sprintf(
-                'rule %s is locked by %s until %s; refusing to run it twice',
-                $id,
-                $lock !== null ? substr($lock['owner'], 0, 8) : '?',
-                $lock !== null ? Tick::stamp($lock['expires']) : '?'
-            ));
-            return;
-        }
-        $this->io->line(Tick::runLine($run));
-        $failed = $run['status'] === 'failure' || $run['original_status'] === 'failure';
-        $this->io->halt($failed ? 1 : 0);
+            if ($state === null) {
+                $storage->insertRuleStates([Sync::newRow($rule, $now, $this->plugin->nextRun())]);
+                $state = $storage->getRuleState($id);
+            }
+            if ($state === null) {
+                $this->fail('could not create the state row for ' . $id);
+                return;
+            }
+            if ($state['paused'] === 1 && !isset($assoc['ignore-pause'])) {
+                $this->fail(sprintf('rule %s is paused (%s); use --ignore-pause to run it anyway', $id, $state['pause_reason']));
+                return;
+            }
+            $run = $this->plugin->runner()->run($rule, $state, new DbTime($now, $this->plugin->clock()));
+            if ($run === null) {
+                $lock = $storage->getLock(Locks::rule($id));
+                $this->fail(sprintf(
+                    'rule %s is locked by %s until %s; refusing to run it twice',
+                    $id,
+                    $lock !== null ? substr($lock['owner'], 0, 8) : '?',
+                    $lock !== null ? Tick::stamp($lock['expires']) : '?'
+                ));
+                return;
+            }
+            $this->io->line(Tick::runLine($run));
+            $failed = $run['status'] === 'failure' || $run['original_status'] === 'failure';
+            $this->io->halt($failed ? 1 : 0);
+        });
     }
 
     /**
@@ -263,7 +271,9 @@ final class Command
      */
     public function due(array $args, array $assoc): void
     {
-        $this->each($args, fn (Operator $op, string $id) => $op->markDue($id), 'due on the next tick');
+        $this->safely(function () use ($args): void {
+            $this->each($args, fn (Operator $op, string $id) => $op->markDue($id), 'due on the next tick');
+        });
     }
 
     /**
@@ -282,8 +292,10 @@ final class Command
      */
     public function pause(array $args, array $assoc): void
     {
-        $reason = (string) ($assoc['reason'] ?? '');
-        $this->each($args, fn (Operator $op, string $id) => $op->pause($id, $reason), 'paused');
+        $this->safely(function () use ($args, $assoc): void {
+            $reason = (string) ($assoc['reason'] ?? '');
+            $this->each($args, fn (Operator $op, string $id) => $op->pause($id, $reason), 'paused');
+        });
     }
 
     /**
@@ -299,7 +311,9 @@ final class Command
      */
     public function resume(array $args, array $assoc): void
     {
-        $this->each($args, fn (Operator $op, string $id) => $op->resume($id), 'resumed');
+        $this->safely(function () use ($args): void {
+            $this->each($args, fn (Operator $op, string $id) => $op->resume($id), 'resumed');
+        });
     }
 
     /**
@@ -321,17 +335,19 @@ final class Command
      */
     public function interval(array $args, array $assoc): void
     {
-        $id = (string) ($args[0] ?? '');
-        if (isset($assoc['reset'])) {
-            $this->each([$id], fn (Operator $op, string $rid) => $op->resetInterval($rid), 'interval reset');
-            return;
-        }
-        $seconds = $this->intArg((string) ($args[1] ?? ''));
-        if ($seconds === null) {
-            $this->fail('give the interval in seconds, or --reset');
-            return;
-        }
-        $this->each([$id], fn (Operator $op, string $rid) => $op->setInterval($rid, $seconds), 'interval set to ' . $seconds . 's');
+        $this->safely(function () use ($args, $assoc): void {
+            $id = (string) ($args[0] ?? '');
+            if (isset($assoc['reset'])) {
+                $this->each([$id], fn (Operator $op, string $rid) => $op->resetInterval($rid), 'interval reset');
+                return;
+            }
+            $seconds = $this->intArg((string) ($args[1] ?? ''));
+            if ($seconds === null) {
+                $this->fail('give the interval in seconds, or --reset');
+                return;
+            }
+            $this->each([$id], fn (Operator $op, string $rid) => $op->setInterval($rid, $seconds), 'interval set to ' . $seconds . 's');
+        });
     }
 
     /**
@@ -350,8 +366,10 @@ final class Command
      */
     public function lane(array $args, array $assoc): void
     {
-        $lane = (string) ($args[1] ?? '');
-        $this->each([(string) ($args[0] ?? '')], fn (Operator $op, string $id) => $op->moveLane($id, $lane), 'moved to lane ' . $lane);
+        $this->safely(function () use ($args): void {
+            $lane = (string) ($args[1] ?? '');
+            $this->each([(string) ($args[0] ?? '')], fn (Operator $op, string $id) => $op->moveLane($id, $lane), 'moved to lane ' . $lane);
+        });
     }
 
     /**
@@ -369,7 +387,9 @@ final class Command
      */
     public function pauseLane(array $args, array $assoc): void
     {
-        $this->laneSwitch((string) ($args[0] ?? ''), true);
+        $this->safely(function () use ($args): void {
+            $this->laneSwitch((string) ($args[0] ?? ''), true);
+        });
     }
 
     /**
@@ -386,7 +406,9 @@ final class Command
      */
     public function resumeLane(array $args, array $assoc): void
     {
-        $this->laneSwitch((string) ($args[0] ?? ''), false);
+        $this->safely(function () use ($args): void {
+            $this->laneSwitch((string) ($args[0] ?? ''), false);
+        });
     }
 
     /**
@@ -402,16 +424,18 @@ final class Command
      */
     public function stop(array $args, array $assoc): void
     {
-        $id = (string) ($args[0] ?? '');
-        try {
-            if ($this->plugin->operator()->requestStop($id)) {
-                $this->io->line($id . ': stop requested');
-            } else {
-                $this->io->warning($id . ' is not running; nothing to stop');
+        $this->safely(function () use ($args): void {
+            $id = (string) ($args[0] ?? '');
+            try {
+                if ($this->plugin->operator()->requestStop($id)) {
+                    $this->io->line($id . ': stop requested');
+                } else {
+                    $this->io->warning($id . ' is not running; nothing to stop');
+                }
+            } catch (InvalidRuleException $e) {
+                $this->fail($e->getMessage());
             }
-        } catch (ImportSchedulerException $e) {
-            $this->fail($e->getMessage());
-        }
+        });
     }
 
     /**
@@ -439,34 +463,36 @@ final class Command
      */
     public function history(array $args, array $assoc): void
     {
-        $id = (string) ($args[0] ?? '');
-        $format = $this->format($assoc);
-        if ($format === null) {
-            return;
-        }
-        try {
-            $this->plugin->operator()->rule($id);
-        } catch (ImportSchedulerException $e) {
-            $this->fail($e->getMessage());
-            return;
-        }
-        $limit = $this->intArg((string) ($assoc['limit'] ?? '50'));
-        if ($limit === null || $limit < 1 || $limit > 1000) {
-            $this->fail('--limit must be 1 to 1000');
-            return;
-        }
-        $rows = [];
-        foreach ($this->plugin->storage()->runsForRule($id, $limit) as $run) {
-            $rows[] = [
-                'id' => $run['id'],
-                'started' => Tick::stamp($run['started']),
-                'duration' => $run['duration_ms'] === null ? '' : sprintf('%.1fs', $run['duration_ms'] / 1000),
-                'status' => $run['status'] . ($run['original_status'] !== '' ? ' (' . $run['original_status'] . ')' : ''),
-                'items' => $run['items'] ?? '',
-                'message' => $run['message'],
-            ];
-        }
-        $this->output($rows, ['id', 'started', 'duration', 'status', 'items', 'message'], $format);
+        $this->safely(function () use ($args, $assoc): void {
+            $id = (string) ($args[0] ?? '');
+            $format = $this->format($assoc);
+            if ($format === null) {
+                return;
+            }
+            try {
+                $this->plugin->operator()->rule($id);
+            } catch (InvalidRuleException $e) {
+                $this->fail($e->getMessage());
+                return;
+            }
+            $limit = $this->intArg((string) ($assoc['limit'] ?? '50'));
+            if ($limit === null || $limit < 1 || $limit > 1000) {
+                $this->fail('--limit must be 1 to 1000');
+                return;
+            }
+            $rows = [];
+            foreach ($this->plugin->storage()->runsForRule($id, $limit) as $run) {
+                $rows[] = [
+                    'id' => $run['id'],
+                    'started' => Tick::stamp($run['started']),
+                    'duration' => $run['duration_ms'] === null ? '' : sprintf('%.1fs', $run['duration_ms'] / 1000),
+                    'status' => $run['status'] . ($run['original_status'] !== '' ? ' (' . $run['original_status'] . ')' : ''),
+                    'items' => $run['items'] ?? '',
+                    'message' => $run['message'],
+                ];
+            }
+            $this->output($rows, ['id', 'started', 'duration', 'status', 'items', 'message'], $format);
+        });
     }
 
     /**
@@ -485,21 +511,23 @@ final class Command
      */
     public function unlock(array $args, array $assoc): void
     {
-        $name = (string) ($args[0] ?? '');
-        $force = isset($assoc['force']);
-        $lock = $this->plugin->storage()->getLock($name);
-        if ($lock !== null && $force) {
-            $this->io->line(sprintf('Removing %s held by %s until %s.', $name, substr($lock['owner'], 0, 8), Tick::stamp($lock['expires'])));
-        }
-        try {
-            if (!$this->plugin->locks()->unlock($name, $force)) {
-                $this->fail('no such lock: ' . $name);
-                return;
+        $this->safely(function () use ($args, $assoc): void {
+            $name = (string) ($args[0] ?? '');
+            $force = isset($assoc['force']);
+            $lock = $this->plugin->storage()->getLock($name);
+            if ($lock !== null && $force) {
+                $this->io->line(sprintf('Removing %s held by %s until %s.', $name, substr($lock['owner'], 0, 8), Tick::stamp($lock['expires'])));
             }
-            $this->io->line('Removed ' . $name . '.');
-        } catch (LockException $e) {
-            $this->fail($e->getMessage());
-        }
+            try {
+                if (!$this->plugin->locks()->unlock($name, $force)) {
+                    $this->fail('no such lock: ' . $name);
+                    return;
+                }
+                $this->io->line('Removed ' . $name . '.');
+            } catch (LockException $e) {
+                $this->fail($e->getMessage());
+            }
+        });
     }
 
     /**
@@ -518,21 +546,23 @@ final class Command
      */
     public function prune(array $args, array $assoc): void
     {
-        $dry = isset($assoc['dry-run']);
-        $storage = $this->plugin->storage();
-        $pruner = new Pruner($storage, $this->plugin->locks());
-        $result = $pruner->run($storage->now(), $this->plugin->settings(true), $dry);
-        $this->io->line(sprintf('%s %d runs and %d tick records past retention.', $dry ? 'Would remove' : 'Removed', $result['runs'], $result['ticks']));
-        if (isset($assoc['orphans'])) {
-            $orphans = [];
-            foreach ($this->plugin->operator()->rules() as $id => $rule) {
-                if (!$rule->registered) {
-                    $orphans[] = $id;
+        $this->safely(function () use ($assoc): void {
+            $dry = isset($assoc['dry-run']);
+            $storage = $this->plugin->storage();
+            $pruner = new Pruner($storage, $this->plugin->locks());
+            $result = $pruner->run($storage->now(), $this->plugin->settings(true), $dry);
+            $this->io->line(sprintf('%s %d runs and %d tick records past retention.', $dry ? 'Would remove' : 'Removed', $result['runs'], $result['ticks']));
+            if (isset($assoc['orphans'])) {
+                $orphans = [];
+                foreach ($this->plugin->operator()->rules() as $id => $rule) {
+                    if (!$rule->registered) {
+                        $orphans[] = $id;
+                    }
                 }
+                $forgot = $pruner->forget($orphans, $dry);
+                $this->io->line(sprintf('%s %d orphaned rules and %d of their runs.', $dry ? 'Would forget' : 'Forgot', $forgot['rules'], $forgot['runs']));
             }
-            $forgot = $pruner->forget($orphans, $dry);
-            $this->io->line(sprintf('%s %d orphaned rules and %d of their runs.', $dry ? 'Would forget' : 'Forgot', $forgot['rules'], $forgot['runs']));
-        }
+        });
     }
 
     /**
@@ -649,7 +679,7 @@ final class Command
             try {
                 $action($operator, $id);
                 $this->io->line($id . ': ' . $done);
-            } catch (ImportSchedulerException $e) {
+            } catch (InvalidRuleException $e) {
                 $this->io->error($e->getMessage());
                 $failed = true;
             }
@@ -686,6 +716,24 @@ final class Command
     private function intArg(string $value): ?int
     {
         return preg_match('/^\d+$/', trim($value)) === 1 ? (int) $value : null;
+    }
+
+    /**
+     * Run a command body and turn database failures into a WP-CLI error
+     * instead of an uncaught exception. Only the tick creates missing
+     * tables; every other command says how to get them.
+     *
+     * @param callable(): void $body
+     */
+    private function safely(callable $body): void
+    {
+        try {
+            $body();
+        } catch (SchemaException $e) {
+            $this->fail('Import scheduler tables are missing: ' . $e->getMessage() . ' Activate the plugin or run a tick, which creates them.');
+        } catch (StorageException $e) {
+            $this->fail('Database error: ' . $e->getMessage());
+        }
     }
 
     private function fail(string $message): void

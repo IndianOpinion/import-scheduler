@@ -152,7 +152,12 @@ final class Screen
         $post = [];
         foreach ($_POST as $key => $value) {
             if (is_string($key)) {
-                $post[$key] = is_array($value) ? array_map('strval', wp_unslash($value)) : sanitize_text_field(wp_unslash((string) $value));
+                if (is_array($value)) {
+                    // Only flat string fields (settings[...]); anything nested is dropped.
+                    $post[$key] = array_map('strval', array_filter(wp_unslash($value), 'is_scalar'));
+                } elseif (is_scalar($value)) {
+                    $post[$key] = sanitize_text_field(wp_unslash((string) $value));
+                }
             }
         }
         $url = $this->process($post);
