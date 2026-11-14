@@ -169,7 +169,15 @@ final class Tick
         $this->runner->setSlot($slotName, $owner);
         try {
             $sync = new Sync($this->storage, $this->registry, $settings, $this->nextRun);
-            $sync->run($now, true, $lane);
+            $states = $sync->run($now, true, $lane);
+            // The slot was sized from registration alone. Operator lane and
+            // interval overrides can bring a slower rule into this lane, so
+            // stretch the slot before the first run when they do.
+            $needed = Locks::laneTtl($budget, $this->largestMaxRuntime($lane, $settings, $states), $grace);
+            if ($needed > $ttl) {
+                $ttl = $needed;
+                $this->locks->renew($slotName, $owner, $ttl);
+            }
             $due = $this->storage->dueRuleStates($lane, $now, self::DUE_LIMIT);
             foreach ($due as $state) {
                 if ($time->elapsedMs() >= $budget * 1000) {
@@ -180,10 +188,10 @@ final class Tick
                 if ($rule === null) {
                     continue;
                 }
-                $run = $this->runner->run($rule, $state, $time);
+                $run = $this->runner->run($rule, $state, $time, true);
                 if ($run === null) {
                     $skipped++;
-                    $out(sprintf('%s %s %s skipped: rule lock held', self::stamp($time->now()), $lane, $rule->id), false);
+                    $out(sprintf('%s %s %s skipped: %s', self::stamp($time->now()), $lane, $rule->id, $this->runner->skipReason()), false);
                     continue;
                 }
                 $ran++;
@@ -192,7 +200,13 @@ final class Tick
                     $failed++;
                 }
                 $out(self::runLine($run), $isFailure);
-                $this->locks->renew($slotName, $owner, $ttl);
+                if (!$this->locks->renew($slotName, $owner, $ttl)) {
+                    // Another tick took this slot after it expired; carrying on
+                    // would run more ticks on the lane than it has slots.
+                    $stopReason = 'lane slot lost';
+                    Log::error(sprintf('lane %s: slot %d was lost during the tick; stopped choosing rules', $lane, $slot));
+                    break;
+                }
                 $fresh = ($this->settings)(true);
                 if (!$fresh->enabled()) {
                     $stopReason = 'disabled';
@@ -292,13 +306,23 @@ final class Tick
         return 0;
     }
 
-    private function largestMaxRuntime(string $lane, Settings $settings): int
+    /**
+     * The largest max runtime among the lane's rules. With state rows, the
+     * operator's lane and interval overrides count; without, registration.
+     *
+     * @param array<string, StateRow> $states
+     */
+    private function largestMaxRuntime(string $lane, Settings $settings, array $states = []): int
     {
         $largest = 0;
-        foreach ($this->registry->all() as $rule) {
-            if ($rule->lane === $lane) {
-                $largest = max($largest, $rule->effectiveMaxRuntime($rule->interval, $settings->int('default_max_runtime')));
+        foreach ($this->registry->all() as $id => $rule) {
+            $state = $states[$id] ?? null;
+            $ruleLane = $state !== null ? ($state['lane_override'] ?? $rule->lane) : $rule->lane;
+            if ($ruleLane !== $lane) {
+                continue;
             }
+            $interval = $state !== null ? ($state['interval_override'] ?? $rule->interval) : $rule->interval;
+            $largest = max($largest, $rule->effectiveMaxRuntime($interval, $settings->int('default_max_runtime')));
         }
         return $largest > 0 ? $largest : $settings->int('default_max_runtime');
     }

@@ -68,14 +68,25 @@ final class Runner
         $this->slot = ($name !== null && $owner !== null) ? ['name' => $name, 'owner' => $owner] : null;
     }
 
+    /** Why the last call to run() returned null. */
+    private string $skipReason = '';
+
     /**
      * Run a rule if its lock can be taken.
      *
+     * The state is read again once the lock is held, because the caller's
+     * copy can be stale: another slot or a manual run may have run the rule,
+     * or an operator may have paused or moved it, since the due list was
+     * read. With $requireDue (the tick) the rule then runs only if it is
+     * still due by the tick's start, unpaused and in the same lane.
+     *
      * @param StateRow $state
-     * @return RunRow|null Null when the rule lock is held by someone else.
+     * @return RunRow|null Null when the rule lock is held by someone else, or
+     *                     (with $requireDue) the rule is no longer due. See skipReason().
      */
-    public function run(Rule $rule, array $state, DbTime $time): ?array
+    public function run(Rule $rule, array $state, DbTime $time, bool $requireDue = false): ?array
     {
+        $this->skipReason = '';
         $settings = ($this->settings)(false);
         $interval = $state['interval_override'] ?? $rule->interval;
         $maxRuntime = $rule->effectiveMaxRuntime($interval, $settings->int('default_max_runtime'));
@@ -83,11 +94,22 @@ final class Runner
         $lockName = Locks::rule($rule->id);
         $owner = Locks::newOwner();
         if (!$this->locks->take($lockName, $owner, Locks::ruleTtl($maxRuntime, $grace))) {
+            $this->skipReason = 'rule lock held';
             return null;
         }
         $lane = $state['lane'];
         $started = $time->now();
         try {
+            $fresh = $this->storage->getRuleState($rule->id);
+            if ($requireDue && ($fresh === null || $fresh['paused'] !== 0 || $fresh['lane'] !== $lane || $fresh['next_run'] > $time->start())) {
+                $this->locks->release($lockName, $owner);
+                $this->skipReason = 'no longer due';
+                return null;
+            }
+            if ($fresh !== null) {
+                $state = $fresh;
+                $interval = $state['interval_override'] ?? $rule->interval;
+            }
             $runId = $this->storage->insertRun([
                 'rule_id' => $rule->id,
                 'lane' => $lane,
@@ -166,7 +188,20 @@ final class Runner
             $this->shutdownRegistered = true;
         }
 
-        do_action('import_scheduler_run_started', $this->storage->getRun($runId) ?? ['id' => $runId, 'rule_id' => $rule->id]);
+        do_action('import_scheduler_run_started', [
+            'id' => $runId,
+            'rule_id' => $rule->id,
+            'lane' => $lane,
+            'started' => $started,
+            'finished' => null,
+            'duration_ms' => null,
+            'status' => 'running',
+            'original_status' => '',
+            'items' => null,
+            'message' => '',
+            'log' => '',
+            'owner' => $owner,
+        ]);
 
         ob_start();
         $result = null;
@@ -188,6 +223,11 @@ final class Runner
             $result = $result->withMessage(Text::head(trim($output), self::MESSAGE_LIMIT));
         }
         return $this->finish($active, $result, $durationMs);
+    }
+
+    public function skipReason(): string
+    {
+        return $this->skipReason;
     }
 
     /**
@@ -401,7 +441,11 @@ final class Runner
         } elseif (!$result->isSuccess()) {
             $fields['next_run'] = $this->nextRun->afterFailure($finished, $interval, $failures, $settings->int('backoff_cap'), $rule->jitter);
         } else {
-            $fields['next_run'] = $this->nextRun->afterSuccess($state['next_run'], $finished, $interval, $rule->jitter);
+            // The scheduled time is the next run the rule was due at. A manual
+            // run before that time counts from its own start, so running a
+            // rule early never pushes its schedule further out.
+            $scheduled = min($state['next_run'], $active['started']);
+            $fields['next_run'] = $this->nextRun->afterSuccess($scheduled, $finished, $interval, $rule->jitter);
         }
 
         $pauseAfter = $settings->int('pause_after_failures');
