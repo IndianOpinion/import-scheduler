@@ -1,0 +1,11 @@
+# Example system crontab entries, one line per lane. Install them with
+# `crontab -e -u <user>` as the user that owns the site files, never root.
+# Replace <path> with the WordPress directory and keep the log files.
+# Offset lanes that run less often than every minute so they never start
+# on the same minute as each other or other heavy jobs.
+
+* * * * * cd <path> && wp import-scheduler tick --lane=default --quiet >> /var/log/import-scheduler/default.log 2>&1
+2-59/5 * * * * cd <path> && wp import-scheduler tick --lane=slow --budget=240 --quiet >> /var/log/import-scheduler/slow.log 2>&1
+
+# /etc/cron.d style (has a user column):
+# * * * * * <user> cd <path> && wp import-scheduler tick --lane=default --quiet >> /var/log/import-scheduler/default.log 2>&1

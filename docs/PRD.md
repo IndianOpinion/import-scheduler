@@ -453,14 +453,14 @@ default and supports `--format=table|json|csv|yaml|ids` where it lists.
 
 ### 4.13 Install, upgrade, uninstall
 
-1. Activation creates the three tables and the settings option. Upgrades
+1. Activation creates the four tables and the settings option. Upgrades
    compare a stored schema version and run the table creation again.
 2. After any schema change the plugin verifies each expected column with
    `SHOW COLUMNS` and reports a missing one on the screen and in `status`,
    because the WordPress table helper can skip a column add without error.
 3. Deactivation removes any WP-Cron fallback events. It leaves tables,
    settings and the crontab alone, and the screen's last message says so.
-4. Uninstall drops the three tables and deletes the settings and schema
+4. Uninstall drops the four tables and deletes the settings and schema
    version options. On multisite it does so for every site. It cannot remove
    the crontab line; the README says to.
 5. Multisite: tables are per site. The tick runs for the site given by WP-CLI's
@@ -612,7 +612,7 @@ Rules for the line, repeated in the README:
 
 ### 6.1 What is stored
 
-Three tables with the site's table prefix, all InnoDB, `utf8mb4`.
+Four tables with the site's table prefix, all InnoDB, `utf8mb4`.
 
 - `<prefix>import_scheduler_rules`: one row per rule id. Columns: rule id
   (primary key), lane override, interval override, paused (bool), pause
@@ -625,9 +625,11 @@ Three tables with the site's table prefix, all InnoDB, `utf8mb4`.
   original status (for overruns), items, message (500), log (2 KB), owner
   token. Index on (rule id, started) and on (started).
 - `<prefix>import_scheduler_locks`: name (primary key), owner token, acquired,
-  expires, heartbeat. Lane tick records (last tick, outcome, reason) live in
-  a fourth row kind in this table under `tick:<lane>`, without an expiry
-  meaning.
+  expires, heartbeat.
+- `<prefix>import_scheduler_ticks`: one row per lane per tick (lane, slot,
+  source, started, finished, outcome, reason, runs, failures), kept 7 days.
+  The builder's ruling on open question 2 moved these records out of the
+  locks table (see `docs/ARCHITECTURE.md`).
 
 Options: `import_scheduler_settings` (array, not autoloaded),
 `import_scheduler_schema_version` (autoloaded).
@@ -688,7 +690,8 @@ previous value kept.
 
 ## 9. Performance budget
 
-- A tick with nothing due: at most 5 database queries and under 50 ms of
+- A tick with nothing due: at most 6 database queries (clock, slot take,
+  rule rows, due query, slot release, tick record) and under 50 ms of
   plugin time on a typical host, excluding WordPress bootstrap.
 - Per run overhead (lock, run row, state update, release): at most 8 queries.
 - Due-rule selection: one indexed query, capped at 200 rows.

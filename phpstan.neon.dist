@@ -1,0 +1,19 @@
+parameters:
+    level: 8
+    paths:
+        - src
+        - import-scheduler.php
+        - uninstall.php
+    bootstrapFiles:
+        - tests/phpstan-bootstrap.php
+    scanFiles:
+        - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
+    treatPhpDocTypesAsCertain: false
+    ignoreErrors:
+        # Table names come from the site prefix and fixed constants, never from
+        # input; values always go through placeholders.
+        -
+            identifier: argument.type
+            message: '#wpdb::prepare\(\) expects literal-string#'
+            path: src/Storage/WpdbConnection.php
