@@ -30,11 +30,11 @@ That design fails quietly as the rule count grows:
 - Nobody can see any of this. The lane writes its output to nowhere, and the
   operator sees only "imports feel slow".
 
-Measured result from the production site this came out of: a single pass
-over more than a hundred feed rules ran for an hour or more, every tick
-inside that window was skipped, and the effective import cadence was about
-half the configured one. Moving the import to its own lane, with per-rule
-scheduling inside it, restored the configured cadence.
+Measured result from the production site this came out of: a large rule set
+ran at about half its configured cadence before the lanes were split. A
+single pass ran for an hour or more and every tick inside that window was
+skipped. Moving the import to its own lane, with per-rule scheduling inside
+it, restored the configured cadence.
 
 This plugin is that fix as a reusable component. Each rule is a separate
 unit of work with its own interval, its own lock, its own history, and a run
@@ -744,11 +744,11 @@ primary key and conditional updates. Lock race tests use two connections.
    accepted.
 6. T6 (4.2.8): an invalid registration does not throw out of the public
    function.
-7. T7 (4.2.9, 4.2.10): a state row exists after the first tick; an
+7. T7 (4.2.9, 4.2.10, 4.15.8): a state row exists after the first tick; an
    unregistered id becomes an orphan, is never run and is not deleted.
-8. T8 (4.2.11, 4.2.12): a new rule is due at once; with start delay it is due
+8. T8 (4.2.11, 4.2.12, 4.6.4): a new rule is due at once; with start delay it is due
    after the delay; with jitter next run lies within the jitter window.
-9. T9 (4.3.1, 4.3.6): with a 5 second budget and three 3 second rules, the
+9. T9 (4.3.1, 4.3.6, 4.3.9, 4.3.10): with a 5 second budget and three 3 second rules, the
    tick runs two and leaves the third due.
 10. T10 (4.3.2, 4.11.1 to 4.11.4): each guard stands down, records a reason,
     takes no lock and exits 0; an unreadable meminfo passes.
@@ -762,15 +762,15 @@ primary key and conditional updates. Lock race tests use two connections.
 15. T15 (4.3.12): exit codes for ran, nothing due, busy, stood down, database
     down, and failure with and without `--strict`.
 16. T16 (4.3.13): dry run lists the order and takes no lock.
-17. T17 (4.4.3, 4.4.4): each return type and a thrown exception map to the
+17. T17 (4.4.3, 4.4.4, 4.4.1): each return type and a thrown exception map to the
     right status, items and message; echoed output is captured and trimmed.
-18. T18 (4.4.5 to 4.4.8): durations, state columns and counters update; an
+18. T18 (4.4.5 to 4.4.8, 4.4.2): durations, state columns and counters update; an
     overrun keeps its original result.
 19. T19 (4.4.10, 5.3): run started and finished actions fire with the run
     record.
-20. T20 (4.5.2): of two processes taking an expired lock at once, exactly one
+20. T20 (4.5.2, 4.5.1): of two processes taking an expired lock at once, exactly one
     wins.
-21. T21 (4.5.3, 4.5.4): release and renew by a non-owner change nothing and
+21. T21 (4.5.3, 4.5.4, 4.4.9): release and renew by a non-owner change nothing and
     return false.
 22. T22 (4.5.5, 4.5.6, 4.5.7): expiry values are computed as stated; an
     expired lock is taken over.
@@ -798,33 +798,33 @@ primary key and conditional updates. Lock race tests use two connections.
 35. T35 (4.7.7): a rule slower than its interval on a one-slot lane runs back
     to back with one interval of rest, and busy ticks exit at once.
 36. T36 (4.8.1): a throwing rule fails and the next rule still runs.
-37. T37 (4.8.2): a `running` row with an expired lock becomes `abandoned` and
+37. T37 (4.8.2, 4.3.4): a `running` row with an expired lock becomes `abandoned` and
     counts as a failure.
 38. T38 (4.8.3, 4.15.10): the shutdown handler closes a run after a fatal and
     after `exit`.
-39. T39 (4.8.4, 4.8.6): database down exits 1 without running; missing tables
+39. T39 (4.8.4, 4.8.6, 4.8.5): database down exits 1 without running; missing tables
     are created once or reported.
 40. T40 (4.8.9): a rule registered only in wp-admin is listed as a
     registration problem.
 41. T41 (4.8.10): a next run far in the future is pulled in.
 42. T42 (4.9.1, 4.9.5, section 8): every screen action rejects a missing
     nonce and a user without the capability.
-43. T43 (4.9.2): a lane with no recent tick shows the warning and the cron
+43. T43 (4.9.2, 4.15.6): a lane with no recent tick shows the warning and the cron
     line.
-44. T44 (4.9.3, 4.9.6, 4.9.8): the rules table and history show the stated
+44. T44 (4.9.3, 4.9.6, 4.9.8, 4.9.4, 4.9.9, 4.9.10): the rules table and history show the stated
     columns, with times in the site zone and UTC on toggle.
 45. T45 (4.9.7): "Run now" on the screen runs nothing in the request.
 46. T46 (4.10.1 to 4.10.14): each CLI command, including unknown ids and
     output formats.
 47. T47 (4.10.13): `cron-line` prints placeholders when values are missing and
     writes no file.
-48. T48 (4.12.2): the constant overrides an enabled setting.
+48. T48 (4.12.2, 4.12.1): the constant overrides an enabled setting.
 49. T49 (4.12.3): the fallback event exits at once when a system tick was seen
     in the last hour.
-50. T50 (4.13.2): a missing column is detected and reported.
+50. T50 (4.13.2, 4.13.1): a missing column is detected and reported.
 51. T51 (4.13.3, 4.13.4): deactivation removes fallback events only;
     uninstall drops tables and options, per site on multisite.
-52. T52 (4.14.2): non-http feed URLs are rejected.
+52. T52 (4.14.2, 4.14.1): non-http feed URLs are rejected.
 53. T53 (4.14.3): the feed cache lifetime filter is set during the call and
     removed after.
 54. T54 (4.14.4): a feed error fails the run with its message.
@@ -837,13 +837,19 @@ primary key and conditional updates. Lock race tests use two connections.
 59. T59 (4.14.9, 4.14.10): the result counts emitted and skipped; a consumer
     exception fails the run.
 60. T60 (4.15.1): zero rules: no lock, exit 0.
-61. T61 (4.15.5): a lane move during a run takes effect on the next run.
+61. T61 (4.15.5, 4.15.9): a lane move during a run takes effect on the next run.
 62. T62 (4.15.7, section 9): with 1,000 due rules the selection query returns
     at most 200 and uses the index.
 63. T63 (6.2): pruning keeps the newest N runs per rule, drops runs past the
     age limit, at most once a day.
 64. T64 (section 8): run messages containing markup are escaped on the
     screen.
+65. T65 (4.5.8): a source scan finds no lock files, no `flock` and no MySQL
+    named lock calls in the plugin.
+66. T66 (4.8.7): the README tells authors to give every HTTP call in a runner
+    a timeout, and the reference adapter sets one on its fetch.
+67. T67 (4.13.5): on a two-site network, a tick with `--url` for one site
+    reads and writes only that site's tables.
 
 ## 13. Open questions
 
