@@ -216,6 +216,10 @@ More detail, and every design decision, is in [docs/ARCHITECTURE.md](docs/ARCHIT
 
 **How do I stop everything now?** Define `IMPORT_SCHEDULER_DISABLE` as `true` in `wp-config.php`, or turn off `enabled`. Running rules see `shouldStop()` turn true. To stop one lane, `wp import-scheduler pause-lane <lane>`.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE). Copyright (c) 2026 Indian Opinion.
